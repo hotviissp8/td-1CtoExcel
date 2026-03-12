@@ -98,8 +98,8 @@ function extractDimInfo(name: string): DimInfo {
     }
     if (allX.length === 1) {
       const d = allX[0];
-      // If sold per piece (шт suffix) → cross-dim is length (rod)
-      const isCutPiece = /[,\s]шт[\.\s]*$/i.test(name);
+      // If sold per piece/meter (шт or м suffix) → cross-dim is length (rod)
+      const isCutPiece = /,\s*(?:шт|м)[.\s]*$/i.test(name);
       if (isCutPiece) return { sortKey: th, dim1: 0, dim2: d, dimLabel: `${d}` };
       // Single "хNмм" without preceding number → roll/film: stated dim is width, other defaults to 1000
       return { sortKey: th, dim1: 1000, dim2: d, dimLabel: `1000x${d}` };
@@ -346,29 +346,32 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     // МП+
     ws.getCell(cG).value = { formula: `ROUNDUP(${cE}*${cF},0)` } as ExcelJS.CellFormulaValue;
 
-    // Цена за м²: both dims → per m²; only dim2 → per п.м.
+    // Цена за м²: both dims → per m²; only dim2 → per п.м.; neither → 0
     ws.getCell(`${L(ci.sqm)}${r}`).value = { formula:
       `IF(AND(${cI1}>0,${cI2}>0),` +
         `ROUNDUP(${cG}/((${cI1}/1000)*(${cI2}/1000)),0),` +
-      `IF(${cI2}>0,ROUNDUP(${cG}/(${cI2}/1000),0),0))`
+      `IF(AND(${cI1}=0,${cI2}>0),ROUNDUP(${cG}/(${cI2}/1000),0),0))`
     } as ExcelJS.CellFormulaValue;
 
-    // цена: sheet (W+L+dims) or rod (L+dim2 only)
+    // цена:
+    //   sheet: user fills both Ширина+Длина, both dims known → area ratio
+    //   rod:   user fills only Длина (dim1=0), dim2=stock length → length ratio
     ws.getCell(`${L(ci.price)}${r}`).value = { formula:
       `IF(AND(${cW}>0,${cL}>0,${cI1}>0,${cI2}>0),` +
         `ROUNDUP(${cG}*${cW}*${cL}/(${cI1}*${cI2}),0),` +
-      `IF(AND(${cL}>0,${cI2}>0),` +
+      `IF(AND(${cL}>0,${cI1}=0,${cI2}>0),` +
         `ROUNDUP(${cG}*${cL}/${cI2},0),""))`
     } as ExcelJS.CellFormulaValue;
 
-    // шт per warehouse
+    // шт per warehouse:
+    //   sheet: INT(stock/kg) × INT(dim1/W) × INT(dim2/L)
+    //   rod:   INT(stock/kg) × INT(dim2/L)
     for (let s = 0; s < N; s++) {
       const cSt = `${L(BASE + s)}${r}`;
-      // Correct cut-count: integer sheets × integer cuts per sheet (no waste-merging)
       ws.getCell(`${L(piecesBase + s)}${r}`).value = { formula:
         `IF(AND(${cSt}>0,${cB}>0,${cW}>0,${cL}>0,${cI1}>0,${cI2}>0),` +
           `INT(${cSt}/${cB})*INT(${cI1}/${cW})*INT(${cI2}/${cL}),` +
-        `IF(AND(${cSt}>0,${cB}>0,${cL}>0,${cI2}>0),` +
+        `IF(AND(${cSt}>0,${cB}>0,${cL}>0,${cI1}=0,${cI2}>0),` +
           `INT(${cSt}/${cB})*INT(${cI2}/${cL}),""))`
       } as ExcelJS.CellFormulaValue;
     }

@@ -17,7 +17,7 @@ export async function POST(request: NextRequest) {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(baseName + '_result.xlsx')}`,
-        'X-Warnings': JSON.stringify(warnings),
+        'X-Warnings': encodeURIComponent(JSON.stringify(warnings)),
         'X-Row-Count': String(rowCount),
         'X-Output-Name': encodeURIComponent(baseName + '_result.xlsx'),
       },

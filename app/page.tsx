@@ -189,7 +189,7 @@ export default function Home() {
 
         const rawWarnings = res.headers.get('X-Warnings') ?? '[]';
         const warnings: string[] = (() => {
-          try { return JSON.parse(rawWarnings); } catch { return []; }
+          try { return JSON.parse(decodeURIComponent(rawWarnings)); } catch { return []; }
         })();
         const rowCount = parseInt(res.headers.get('X-Row-Count') ?? '0', 10);
         const rawName = res.headers.get('X-Output-Name') ?? '';
