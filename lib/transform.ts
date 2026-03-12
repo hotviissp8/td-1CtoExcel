@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs';
 const DEFAULT_KG   = 1.0;
 const MAIN_COEF    = 3.5;
 const SEC_COEF     = 1.1;
-const RETAIL_MUL   = 1.14;
+const RETAIL_MUL   = 1.15;
 
 // ---- Helpers ----
 function parseRu(s: string) { return parseFloat(s.replace(',', '.')); }
@@ -265,64 +265,73 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
 
   // ---- Output column layout ----
   //
+  // Without retailMarkup:
   //  A0   Номенклатура
-  //  B1   Вес, кг
+  //  B1   Ед (kg)
   //  C2   Розн
   //  D3   %
-  //  E4   МП  = ROUNDUP(C*D, 0)
-  //  F5   коэффициент
-  //  G6   МП+ = ROUNDUP(E*F, 0)
-  //  H7   Размер  (width × height only, no thickness)
-  //  I8..I8+N-1    warehouse stock columns  (N ≥ 1)
-  //  8+N           Цена за м²
-  //  8+N+1  [hid]  dim1 (width, mm)
-  //  8+N+2  [hid]  dim2 (height/length, mm)
-  //  8+N+3  [hid]  Д/Т мм  (thickness / diameter — sort key)
-  //  8+N+4         Ширина  (user input, blue)
-  //  8+N+5         Длина   (user input, blue)
-  //  8+N+6         цена    (formula)
-  //  8+N+7..8+2N+6  шт_1 .. шт_N  (one per warehouse)
+  //  E4   МП  = ROUNDUP(Розн*%, 0)
+  //  F5   К
+  //  G6   МП+ = ROUNDUP(МП*К, 0)
+  //  H7..H7+N-1    warehouse stock columns
+  //  7+N    [hid]  dim1
+  //  7+N+1  [hid]  dim2
+  //  7+N+2  [hid]  Д/Т
+  //  7+N+3         Шир  (user input)
+  //  7+N+4         Дл   (user input)
+  //  7+N+5         Цена (formula)
+  //  7+N+6..7+2N+5  шт_1..шт_N
+  //
+  // With retailMarkup: МелкОпт inserted at C2, Розн at D3 as formula =ROUNDUP(МелкОпт*MUL,0)
+  //  everything shifts +1 from retail onward
 
   const N    = Math.max(stockCols.length, 1);
-  const BASE = 8;
+  // If retailMarkup, we insert a МелкОпт column before Розн
+  const BASE_OFFSET   = retailMarkup ? 1 : 0;  // shift for all cols after kg
+  const BASE = 7 + BASE_OFFSET;                // first stock col
 
   const ci = {
-    name:    0, kg: 1, retail: 2, pct: 3, mp: 4, coef: 5, mpPlus: 6, dimStr: 7,
+    name:      0,
+    kg:        1,
+    smallBatch: retailMarkup ? 2 : -1,
+    retail:    2 + BASE_OFFSET,
+    pct:       3 + BASE_OFFSET,
+    mp:        4 + BASE_OFFSET,
+    coef:      5 + BASE_OFFSET,
+    mpPlus:    6 + BASE_OFFSET,
     // stock cols: BASE + 0 .. BASE + N-1
-    sqm:       BASE + N,
-    dim1:      BASE + N + 1,
-    dim2:      BASE + N + 2,
-    sortKey:   BASE + N + 3,
-    width:     BASE + N + 4,
-    length:    BASE + N + 5,
-    price:     BASE + N + 6,
-    // pieces: BASE + N + 7 + s  (s = 0..N-1)
+    dim1:      BASE + N,
+    dim2:      BASE + N + 1,
+    sortKey:   BASE + N + 2,
+    width:     BASE + N + 3,
+    length:    BASE + N + 4,
+    price:     BASE + N + 5,
+    // pieces: BASE + N + 6 + s
   };
-  const piecesBase = BASE + N + 7;
+  const piecesBase = BASE + N + 6;
   const totalCols  = piecesBase + N;
 
   // header row
   const hdr: (string | null)[] = new Array(totalCols).fill(null);
   hdr[ci.name]   = 'Номенклатура';
-  hdr[ci.kg]     = 'Вес, кг';
+  hdr[ci.kg]     = 'Ед';
+  if (retailMarkup) hdr[ci.smallBatch] = 'МелкОпт';
   hdr[ci.retail] = 'Розн';
   hdr[ci.pct]    = '%';
   hdr[ci.mp]     = 'МП';
-  hdr[ci.coef]   = 'коэффициент';
+  hdr[ci.coef]   = 'К';
   hdr[ci.mpPlus] = 'МП+';
-  hdr[ci.dimStr] = 'Размер';
   for (let s = 0; s < N; s++) {
-    hdr[BASE + s] = `${capFirst(stockCols[s]?.label ?? `Склад ${s+1}`)} ост-к`;
+    hdr[BASE + s] = `${capFirst(stockCols[s]?.label ?? ``)}`;
   }
-  hdr[ci.sqm]     = 'Цена за м²';
   hdr[ci.dim1]    = 'dim1';
   hdr[ci.dim2]    = 'dim2';
-  hdr[ci.sortKey] = 'Д/Т мм';
-  hdr[ci.width]   = 'Ширина';
-  hdr[ci.length]  = 'Длина';
-  hdr[ci.price]   = 'цена';
+  hdr[ci.sortKey] = 'Д/Т';
+  hdr[ci.width]   = 'Шир';
+  hdr[ci.length]  = 'Дл';
+  hdr[ci.price]   = 'Цена';
   for (let s = 0; s < N; s++) {
-    hdr[piecesBase + s] = `${capFirst(stockCols[s]?.label ?? `Склад ${s+1}`)} шт`;
+    hdr[piecesBase + s] = `${capFirst(stockCols[s]?.label ?? ``)} шт`;
   }
 
   // ---- Build data rows ----
@@ -334,9 +343,8 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const name = String(row[nameCol] ?? '').trim();
     if (!name) continue;
 
-    let retail = retailSrc !== null ? safeNum(row[retailSrc]) : null;
-    if (retail === null) continue; // category/separator row
-    if (retailMarkup) retail = Math.ceil(retail * RETAIL_MUL);
+    const rawRetail = retailSrc !== null ? safeNum(row[retailSrc]) : null;
+    if (rawRetail === null) continue; // category/separator row
 
     const stocks    = stockCols.map(({ col }) => safeNum(row[col]));
     const [kg, kgD] = extractWeight(name);
@@ -345,10 +353,15 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const d: (string | number | null)[] = new Array(totalCols).fill(null);
     d[ci.name]    = name;
     d[ci.kg]      = kg;
-    d[ci.retail]  = retail;
+    // If retailMarkup: store source price in smallBatch col; retail col gets formula later
+    if (retailMarkup) {
+      d[ci.smallBatch] = rawRetail;
+      d[ci.retail]     = null; // filled by formula
+    } else {
+      d[ci.retail] = rawRetail;
+    }
     d[ci.pct]     = MAIN_COEF;
     d[ci.coef]    = SEC_COEF;
-    d[ci.dimStr]  = dimInfo.dimLabel || null;
     for (let s = 0; s < N; s++) d[BASE + s] = stocks[s] ?? null;
     d[ci.dim1]    = dimInfo.dim1 || null;
     d[ci.dim2]    = dimInfo.dim2 || null;
@@ -381,20 +394,15 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const cW  = `${L(ci.width)}${r}`;
     const cL  = `${L(ci.length)}${r}`;
 
+    // Розн = ROUNDUP(МелкОпт * MUL, 0) when retailMarkup
+    if (retailMarkup) {
+      const cSB = `${L(ci.smallBatch)}${r}`;
+      ws.getCell(cC).value = { formula: `ROUNDUP(${cSB}*${RETAIL_MUL},0)` } as ExcelJS.CellFormulaValue;
+    }
     // МП
     ws.getCell(cE).value = { formula: `ROUNDUP(${cC}*${cD},0)` } as ExcelJS.CellFormulaValue;
     // МП+
     ws.getCell(cG).value = { formula: `ROUNDUP(${cE}*${cF},0)` } as ExcelJS.CellFormulaValue;
-
-    // Цена за м²:
-    //   sheet/roll (dim1>0, dim2>0) → per m²
-    //   rod        (dim1=0, dim2>0) → per п.м. (length only)
-    //   neither                     → 0
-    ws.getCell(`${L(ci.sqm)}${r}`).value = { formula:
-      `IF(AND(${cI1}>0,${cI2}>0),` +
-        `ROUNDUP(${cG}/((${cI1}/1000)*(${cI2}/1000)),0),` +
-      `IF(AND(${cI1}=0,${cI2}>0),ROUNDUP(${cG}/(${cI2}/1000),0),0))`
-    } as ExcelJS.CellFormulaValue;
 
     // цена:
     //   cut piece (both dims, user fills W+L): area ratio
@@ -427,24 +435,40 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   }
 
   // ---- Styling ----
-  const fillWarn   = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFFF2CC' } };
-  const fillRed    = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFF0000' } };
-  const fillMarkup = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFE2EFDA' } };
-  const fillInput  = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFDCE6F1' } };
+  const fillWarn      = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFFF2CC' } }; // yellow — kg defaulted
+  const fillRed       = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFF0000' } }; // red — no stock
+  const fillKg        = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFFF9D6' } }; // light yellow — kg col
+  const fillRetail    = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFD9EAD3' } }; // light green — retail
+  const fillPrice     = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFB8CCE4' } }; // light blue — МП+, цена
+  const fillInput     = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFE8F0F8' } }; // very light blue — Шир/Дл
 
+  // kg column header always light yellow; data cells: yellow-warn if defaulted, else light yellow
+  ws.getRow(1).getCell(ci.kg + 1).fill = fillKg;
   outRows.forEach(({ kgDefaulted }, idx) => {
-    if (kgDefaulted) ws.getCell(`B${idx + 2}`).fill = fillWarn;
+    ws.getCell(`B${idx + 2}`).fill = kgDefaulted ? fillWarn : fillKg;
   });
-  if (retailMarkup) {
-    ws.getRow(1).getCell(ci.retail + 1).fill = fillMarkup;
-    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(ci.retail)}${r}`).fill = fillMarkup;
+
+  // retail column — light green (header + data); also smallBatch if present
+  const retailColsToColor = retailMarkup ? [ci.smallBatch, ci.retail] : [ci.retail];
+  for (const idx of retailColsToColor) {
+    ws.getRow(1).getCell(idx + 1).fill = fillRetail;
+    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).fill = fillRetail;
   }
-  if (stockCols.length === 0) {
-    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(BASE)}${r}`).fill = fillRed;
+
+  // МП+ and цена — light blue
+  for (const idx of [ci.mpPlus, ci.price]) {
+    ws.getRow(1).getCell(idx + 1).fill = fillPrice;
+    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).fill = fillPrice;
   }
+
+  // Шир / Дл — very light blue (user input)
   for (const idx of [ci.width, ci.length]) {
     ws.getRow(1).getCell(idx + 1).fill = fillInput;
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).fill = fillInput;
+  }
+
+  if (stockCols.length === 0) {
+    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(BASE)}${r}`).fill = fillRed;
   }
 
   // font
@@ -452,8 +476,11 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   ws.eachRow(row => row.eachCell({ includeEmpty: true }, cell => { cell.font = font; }));
 
   // number format on price columns
-  for (const idx of [ci.retail, ci.mp, ci.mpPlus, ci.sqm, ci.price]) {
+  for (const idx of [ci.retail, ci.mp, ci.mpPlus, ci.price]) {
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).numFmt = '#,##0';
+  }
+  if (retailMarkup) {
+    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(ci.smallBatch)}${r}`).numFmt = '#,##0';
   }
 
   // hide internal columns
