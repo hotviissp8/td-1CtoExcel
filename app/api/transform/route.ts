@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
     return new NextResponse(new Uint8Array(out), {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': `attachment; filename="${encodeURIComponent(baseName + '_result.xlsx')}"`,
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(baseName + '_result.xlsx')}`,
         'X-Warnings': JSON.stringify(warnings),
         'X-Row-Count': String(rowCount),
         'X-Output-Name': encodeURIComponent(baseName + '_result.xlsx'),
