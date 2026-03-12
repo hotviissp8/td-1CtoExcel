@@ -44,11 +44,35 @@ interface DimInfo {
   dimLabel: string;  // Размер column: width×height or length only (NO thickness)
 }
 
+// Returns true if name indicates a rod/bar (sold by meter, round cross-section)
+function isRod(name: string): boolean {
+  return /[øØ°]/.test(name) || /\bд(?:иам\w*)?\s*\d/i.test(name) ||
+    /\bстерж/i.test(name) || /\bпруток/i.test(name);
+}
+
+// Returns true if sold by the meter (', м' or similar at end)
+function isByMeter(name: string): boolean {
+  return /,\s*м\.?\s*$/i.test(name);
+}
+
+// Returns true if sold by the piece (', шт' at end)
+function isByPiece(name: string): boolean {
+  return /,\s*шт\.?\s*$/i.test(name);
+}
+
 function extractDimInfo(name: string): DimInfo {
+  const byMeter = isByMeter(name);
+  const byPiece = isByPiece(name);
+  const rod     = isRod(name);
+
   // P1 – explicit Th×W×H     e.g. "2x1000x2000", "0,5x600x1200"
   let m = name.match(/\b(\d+(?:[,\.]\d+)?)\s*[xхXХ]\s*(\d{2,4})\s*[xхXХ]\s*(\d{3,5})\b/i);
   if (m) {
     const th = parseRu(m[1]), w = +m[2], h = +m[3];
+    if (byMeter && !byPiece) {
+      // sheet by meter: only width matters, length = 1000
+      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: `${w}x1000` };
+    }
     return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}` };
   }
 
@@ -56,6 +80,9 @@ function extractDimInfo(name: string): DimInfo {
   m = name.match(/\b(\d+[,\.]\d+)\s*[xхXХ]\s*(\d{3,5})/i);
   if (m) {
     const th = parseRu(m[1]), w = +m[2];
+    if (byMeter && !byPiece) {
+      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: `${w}x1000` };
+    }
     const rest = name.slice(name.indexOf(m[0]) + m[0].length);
     const hm = rest.match(/[xхXХ]\s*(\d{3,5})/i);
     const h = hm ? +hm[1] : 0;
@@ -66,6 +93,7 @@ function extractDimInfo(name: string): DimInfo {
   m = name.match(/[øØ°]\s*(\d+(?:[,\.]\d+)?)\s*(?:[xхXХ]\s*(\d{3,6}))?/i);
   if (m) {
     const d = parseRu(m[1]), l = m[2] ? +m[2] : 0;
+    // Rod by meter: only length (dim2), dim1=0
     return { sortKey: d, dim1: 0, dim2: l, dimLabel: l ? `${l}` : '' };
   }
 
@@ -86,8 +114,22 @@ function extractDimInfo(name: string): DimInfo {
   if (thM) {
     const rawTh = parseRu(thM[1]);
     const isMicron = thM[2].toLowerCase() === 'мкм';
-    const th = isMicron ? rawTh / 1000 : rawTh; // normalise to mm for sortKey
+    const th = isMicron ? rawTh / 1000 : rawTh;
 
+    if (byMeter && !byPiece) {
+      // Sold by meter
+      if (rod) {
+        // Rod: single dim = length (stock length in name)
+        const l = allX.length > 0 ? allX[allX.length - 1] : 0;
+        return { sortKey: th, dim1: 0, dim2: l, dimLabel: l ? `${l}` : '' };
+      } else {
+        // Sheet/roll by meter: extract width only, dim2=1000
+        const w = allX.length > 0 ? allX[0] : 0;
+        return { sortKey: th, dim1: w, dim2: 1000, dimLabel: w ? `${w}x1000` : '' };
+      }
+    }
+
+    // byPiece or plain (no suffix)
     if (whPairs.length > 0) {
       const w = +whPairs[0][1], h = +whPairs[0][2];
       return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}` };
@@ -98,11 +140,9 @@ function extractDimInfo(name: string): DimInfo {
     }
     if (allX.length === 1) {
       const d = allX[0];
-      // If sold per piece/meter (шт or м suffix) → cross-dim is length (rod)
-      const isCutPiece = /,\s*(?:шт|м)[.\s]*$/i.test(name);
-      if (isCutPiece) return { sortKey: th, dim1: 0, dim2: d, dimLabel: `${d}` };
-      // Single "хNмм" without preceding number → roll/film: stated dim is width, other defaults to 1000
-      return { sortKey: th, dim1: 1000, dim2: d, dimLabel: `1000x${d}` };
+      if (byPiece) return { sortKey: th, dim1: 0, dim2: d, dimLabel: `${d}` };
+      // No suffix, single dim → roll/film: width × 1000
+      return { sortKey: th, dim1: d, dim2: 1000, dimLabel: `${d}x1000` };
     }
     return { sortKey: th, dim1: 0, dim2: 0, dimLabel: '' };
   }
@@ -346,7 +386,10 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     // МП+
     ws.getCell(cG).value = { formula: `ROUNDUP(${cE}*${cF},0)` } as ExcelJS.CellFormulaValue;
 
-    // Цена за м²: both dims → per m²; only dim2 → per п.м.; neither → 0
+    // Цена за м²:
+    //   sheet/roll (dim1>0, dim2>0) → per m²
+    //   rod        (dim1=0, dim2>0) → per п.м. (length only)
+    //   neither                     → 0
     ws.getCell(`${L(ci.sqm)}${r}`).value = { formula:
       `IF(AND(${cI1}>0,${cI2}>0),` +
         `ROUNDUP(${cG}/((${cI1}/1000)*(${cI2}/1000)),0),` +
@@ -354,25 +397,31 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     } as ExcelJS.CellFormulaValue;
 
     // цена:
-    //   sheet: user fills both Ширина+Длина, both dims known → area ratio
-    //   rod:   user fills only Длина (dim1=0), dim2=stock length → length ratio
+    //   cut piece (both dims, user fills W+L): area ratio
+    //   sheet by meter (dim1>0, dim2=1000, user fills W only): W/dim1 ratio
+    //   rod (dim1=0, user fills L only): L/dim2 ratio
     ws.getCell(`${L(ci.price)}${r}`).value = { formula:
       `IF(AND(${cW}>0,${cL}>0,${cI1}>0,${cI2}>0),` +
         `ROUNDUP(${cG}*${cW}*${cL}/(${cI1}*${cI2}),0),` +
+      `IF(AND(${cW}>0,${cI1}>0,${cI2}=1000),` +
+        `ROUNDUP(${cG}*${cW}/${cI1},0),` +
       `IF(AND(${cL}>0,${cI1}=0,${cI2}>0),` +
-        `ROUNDUP(${cG}*${cL}/${cI2},0),""))`
+        `ROUNDUP(${cG}*${cL}/${cI2},0),"")))`
     } as ExcelJS.CellFormulaValue;
 
     // шт per warehouse:
-    //   sheet: INT(stock/kg) × INT(dim1/W) × INT(dim2/L)
-    //   rod:   INT(stock/kg) × INT(dim2/L)
+    //   cut piece (both dims): INT(stock/kg) × INT(dim1/W) × INT(dim2/L)
+    //   sheet by meter (dim2=1000, W only): INT(stock/kg) × INT(dim1/W)
+    //   rod (dim1=0, L only): INT(stock/kg) × INT(dim2/L)
     for (let s = 0; s < N; s++) {
       const cSt = `${L(BASE + s)}${r}`;
       ws.getCell(`${L(piecesBase + s)}${r}`).value = { formula:
         `IF(AND(${cSt}>0,${cB}>0,${cW}>0,${cL}>0,${cI1}>0,${cI2}>0),` +
           `INT(${cSt}/${cB})*INT(${cI1}/${cW})*INT(${cI2}/${cL}),` +
+        `IF(AND(${cSt}>0,${cB}>0,${cW}>0,${cI1}>0,${cI2}=1000),` +
+          `INT(${cSt}/${cB})*INT(${cI1}/${cW}),` +
         `IF(AND(${cSt}>0,${cB}>0,${cL}>0,${cI1}=0,${cI2}>0),` +
-          `INT(${cSt}/${cB})*INT(${cI2}/${cL}),""))`
+          `INT(${cSt}/${cB})*INT(${cI2}/${cL}),"")))`
       } as ExcelJS.CellFormulaValue;
     }
   }
