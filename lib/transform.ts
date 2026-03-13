@@ -290,14 +290,18 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     mp:         4 + BASE_OFFSET,
     coef:       5 + BASE_OFFSET,
     mpPlus:     6 + BASE_OFFSET,
+    // stock cols: BASE + 0 .. BASE + N-1
     dim1:       BASE + N,
     dim2:       BASE + N + 1,
     sortKey:    BASE + N + 2,
     width:      BASE + N + 3,
     length:     BASE + N + 4,
     price:      BASE + N + 5,
+    // hidden raw price cols (for formula references)
+    rawSB:      BASE + N + 6,      // hidden: raw small batch price (only if hasSmallBatch)
+    rawRetail:  BASE + N + 7,      // hidden: raw retail price (only if !retailMarkup)
   };
-  const piecesBase = BASE + N + 6;
+  const piecesBase = BASE + N + 8;
   const totalCols  = piecesBase + N;
 
   // header row
@@ -311,12 +315,14 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   hdr[ci.coef]   = 'К';
   hdr[ci.mpPlus] = 'МП+';
   for (let s = 0; s < N; s++) hdr[BASE + s] = capFirst(stockCols[s]?.label ?? '');
-  hdr[ci.dim1]    = 'dim1';
-  hdr[ci.dim2]    = 'dim2';
-  hdr[ci.sortKey] = 'Д/Т';
-  hdr[ci.width]   = 'Шир';
-  hdr[ci.length]  = 'Дл';
-  hdr[ci.price]   = 'Цена';
+  hdr[ci.dim1]      = 'dim1';
+  hdr[ci.dim2]      = 'dim2';
+  hdr[ci.sortKey]   = 'Д/Т';
+  hdr[ci.width]     = 'Шир';
+  hdr[ci.length]    = 'Дл';
+  hdr[ci.price]     = 'Цена';
+  hdr[ci.rawSB]     = 'rawSB';
+  hdr[ci.rawRetail] = 'rawRozn';
   for (let s = 0; s < N; s++) hdr[piecesBase + s] = `${capFirst(stockCols[s]?.label ?? '')} шт`;
 
   // ---- Build data rows ----
@@ -343,19 +349,10 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     d[ci.name] = name;
     d[ci.kg]   = kg;
 
-    // МО = small batch price × kg (stored as plain number)
-    if (hasSmallBatch) {
-      d[ci.smallBatch] = rawSB !== null ? rawSB * kg : null;
-    }
-
-    // Розн: if retail exists in input → raw × kg stored; else formula МО×1.15 (applied below)
-    if (!retailMarkup) {
-      // retail found in input
-      d[ci.retail] = rawRetail !== null ? rawRetail * kg
-                   : rawSB    !== null  ? rawSB * kg * RETAIL_MUL  // fallback: sb×kg×1.15
-                   : null;
-    }
-    // else retailMarkup: retail col filled by formula in formula pass
+    // Store raw prices in hidden cols; МО and Розн will be Excel formulas referencing them
+    if (hasSmallBatch)  d[ci.rawSB]     = rawSB     ?? null;
+    if (!retailMarkup)  d[ci.rawRetail] = rawRetail ?? (rawSB !== null ? rawSB * RETAIL_MUL : null);
+    // МО and Розн (smallBatch/retail cols) are filled by formulas in formula pass
 
     d[ci.pct]  = MAIN_COEF;
     d[ci.coef] = SEC_COEF;
@@ -391,10 +388,17 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const cW  = `${L(ci.width)}${r}`;
     const cL  = `${L(ci.length)}${r}`;
 
-    // Розн = ROUNDUP(МО * 1.15, 0) when retail not in input but МО is
+    // МО = rawSB × kg
+    if (hasSmallBatch) {
+      const cRawSB = `${L(ci.rawSB)}${r}`;
+      ws.getCell(`${L(ci.smallBatch)}${r}`).value = { formula: `${cRawSB}*${cB}` } as ExcelJS.CellFormulaValue;
+    }
+    // Розн = rawRetail × kg, or МО × 1.15 if retailMarkup
     if (retailMarkup && hasSmallBatch) {
-      const cSB = `${L(ci.smallBatch)}${r}`;
-      ws.getCell(cC).value = { formula: `ROUNDUP(${cSB}*${RETAIL_MUL},0)` } as ExcelJS.CellFormulaValue;
+      ws.getCell(cC).value = { formula: `ROUNDUP(${L(ci.smallBatch)}${r}*${RETAIL_MUL},0)` } as ExcelJS.CellFormulaValue;
+    } else {
+      const cRawR = `${L(ci.rawRetail)}${r}`;
+      ws.getCell(cC).value = { formula: `${cRawR}*${cB}` } as ExcelJS.CellFormulaValue;
     }
     // МП
     ws.getCell(cE).value = { formula: `ROUNDUP(${cC}*${cD},0)` } as ExcelJS.CellFormulaValue;
@@ -481,7 +485,9 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   }
 
   // hide internal columns
-  for (const idx of [ci.dim1, ci.dim2, ci.sortKey]) {
+  const hiddenCols = [ci.dim1, ci.dim2, ci.sortKey, ci.rawRetail];
+  if (hasSmallBatch) hiddenCols.push(ci.rawSB);
+  for (const idx of hiddenCols) {
     ws.getColumn(idx + 1).hidden = true;
   }
 
