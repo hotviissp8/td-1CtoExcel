@@ -248,65 +248,54 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   const nameCol = findColumn(ch, ['номенклатур', 'товар', 'продукт'], used);
   if (nameCol === null) throw new Error('Колонка с названием не обнаружена');
 
-  // Retail: розничная → мелк/малый ×1.14 → оптов direct
-  let retailSrc: number | null = null, retailMarkup = false;
-  retailSrc = findColumn(ch, [['розниц', 20], ['розничная', 20]], used);
-  if (retailSrc === null) {
-    const sb = findColumn(ch, [['мелкийопт', 20], ['малый', 15], ['мелк', 10]], used);
-    if (sb !== null) { retailSrc = sb; retailMarkup = true; }
-  }
-  if (retailSrc === null) retailSrc = findColumn(ch, [['оптов', 10], ['опт', 5]], used);
+  // Small batch (МелкОпт): мелкийопт / малый / мелк
+  let smallBatchSrc: number | null = findColumn(ch, [['мелкийопт', 20], ['малый', 15], ['мелк', 10]], used);
 
-  if (retailSrc === null) warnings.push('Ни розничная, ни оптовая цена не найдена — столбец Розн пуст');
-  else if (retailMarkup) warnings.push('Розничная цена не найдена — вычислена как Малый опт × 1,14');
+  // Retail: розничная → if not found, derive from small batch × 1.15
+  let retailSrc: number | null = findColumn(ch, [['розниц', 20], ['розничная', 20]], used);
+  const retailMarkup = (retailSrc === null && smallBatchSrc !== null); // Розн not in input → formula
+  if (retailSrc === null && smallBatchSrc === null) {
+    // fallback: оптовая as retail
+    retailSrc = findColumn(ch, [['оптов', 10], ['опт', 5]], used);
+  }
+
+  const hasSmallBatch = smallBatchSrc !== null;
+
+  if (retailSrc === null && smallBatchSrc === null) warnings.push('Ни розничная, ни оптовая, ни мелкооптовая цена не найдена — столбец Розн пуст');
+  else if (retailMarkup) warnings.push('Розничная цена не найдена — вычислена как Малый опт × 1,15');
 
   const stockCols = findAllStockCols(ch, used);
   if (stockCols.length === 0) warnings.push('Колонки остатка не найдены');
 
   // ---- Output column layout ----
   //
-  // Without retailMarkup:
   //  A0   Номенклатура
   //  B1   Ед (kg)
-  //  C2   Розн
-  //  D3   %
-  //  E4   МП  = ROUNDUP(Розн*%, 0)
-  //  F5   К
-  //  G6   МП+ = ROUNDUP(МП*К, 0)
-  //  H7..H7+N-1    warehouse stock columns
-  //  7+N    [hid]  dim1
-  //  7+N+1  [hid]  dim2
-  //  7+N+2  [hid]  Д/Т
-  //  7+N+3         Шир  (user input)
-  //  7+N+4         Дл   (user input)
-  //  7+N+5         Цена (formula)
-  //  7+N+6..7+2N+5  шт_1..шт_N
-  //
-  // With retailMarkup: МелкОпт inserted at C2, Розн at D3 as formula =ROUNDUP(МелкОпт*MUL,0)
-  //  everything shifts +1 from retail onward
+  //  C2   МО  (small batch × kg) — only if hasSmallBatch
+  //  C/D  Розн (retail × kg, or МО×1.15 formula if not in input)
+  //  %    МП  = ROUNDUP(Розн*%, 0)
+  //  К    МП+ = ROUNDUP(МП*К, 0)
+  //  stock cols, hidden dims, Шир, Дл, Цена, шт cols
 
   const N    = Math.max(stockCols.length, 1);
-  // If retailMarkup, we insert a МелкОпт column before Розн
-  const BASE_OFFSET   = retailMarkup ? 1 : 0;  // shift for all cols after kg
-  const BASE = 7 + BASE_OFFSET;                // first stock col
+  const BASE_OFFSET = hasSmallBatch ? 1 : 0; // МО column shifts everything by 1
+  const BASE = 7 + BASE_OFFSET;
 
   const ci = {
-    name:      0,
-    kg:        1,
-    smallBatch: retailMarkup ? 2 : -1,
-    retail:    2 + BASE_OFFSET,
-    pct:       3 + BASE_OFFSET,
-    mp:        4 + BASE_OFFSET,
-    coef:      5 + BASE_OFFSET,
-    mpPlus:    6 + BASE_OFFSET,
-    // stock cols: BASE + 0 .. BASE + N-1
-    dim1:      BASE + N,
-    dim2:      BASE + N + 1,
-    sortKey:   BASE + N + 2,
-    width:     BASE + N + 3,
-    length:    BASE + N + 4,
-    price:     BASE + N + 5,
-    // pieces: BASE + N + 6 + s
+    name:       0,
+    kg:         1,
+    smallBatch: hasSmallBatch ? 2 : -1,
+    retail:     2 + BASE_OFFSET,
+    pct:        3 + BASE_OFFSET,
+    mp:         4 + BASE_OFFSET,
+    coef:       5 + BASE_OFFSET,
+    mpPlus:     6 + BASE_OFFSET,
+    dim1:       BASE + N,
+    dim2:       BASE + N + 1,
+    sortKey:    BASE + N + 2,
+    width:      BASE + N + 3,
+    length:     BASE + N + 4,
+    price:      BASE + N + 5,
   };
   const piecesBase = BASE + N + 6;
   const totalCols  = piecesBase + N;
@@ -315,24 +304,20 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   const hdr: (string | null)[] = new Array(totalCols).fill(null);
   hdr[ci.name]   = 'Номенклатура';
   hdr[ci.kg]     = 'Ед';
-  if (retailMarkup) hdr[ci.smallBatch] = 'МелкОпт';
+  if (hasSmallBatch) hdr[ci.smallBatch] = 'МО';
   hdr[ci.retail] = 'Розн';
   hdr[ci.pct]    = '%';
   hdr[ci.mp]     = 'МП';
   hdr[ci.coef]   = 'К';
   hdr[ci.mpPlus] = 'МП+';
-  for (let s = 0; s < N; s++) {
-    hdr[BASE + s] = `${capFirst(stockCols[s]?.label ?? ``)}`;
-  }
+  for (let s = 0; s < N; s++) hdr[BASE + s] = capFirst(stockCols[s]?.label ?? '');
   hdr[ci.dim1]    = 'dim1';
   hdr[ci.dim2]    = 'dim2';
   hdr[ci.sortKey] = 'Д/Т';
   hdr[ci.width]   = 'Шир';
   hdr[ci.length]  = 'Дл';
   hdr[ci.price]   = 'Цена';
-  for (let s = 0; s < N; s++) {
-    hdr[piecesBase + s] = `${capFirst(stockCols[s]?.label ?? ``)} шт`;
-  }
+  for (let s = 0; s < N; s++) hdr[piecesBase + s] = `${capFirst(stockCols[s]?.label ?? '')} шт`;
 
   // ---- Build data rows ----
   interface OutRow { data: (string | number | null)[]; kgDefaulted: boolean; dimInfo: DimInfo; }
@@ -343,25 +328,37 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const name = String(row[nameCol] ?? '').trim();
     if (!name) continue;
 
-    const rawRetail = retailSrc !== null ? safeNum(row[retailSrc]) : null;
-    if (rawRetail === null) continue; // category/separator row
+    // Determine raw prices from input (before weight multiplication)
+    const rawSB     = smallBatchSrc !== null ? safeNum(row[smallBatchSrc]) : null;
+    const rawRetail = retailSrc     !== null ? safeNum(row[retailSrc])     : null;
 
-    const stocks    = stockCols.map(({ col }) => safeNum(row[col]));
+    // Skip category/separator rows: need at least one price
+    if (rawSB === null && rawRetail === null) continue;
+
     const [kg, kgD] = extractWeight(name);
     const dimInfo   = extractDimInfo(name);
+    const stocks    = stockCols.map(({ col }) => safeNum(row[col]));
 
     const d: (string | number | null)[] = new Array(totalCols).fill(null);
-    d[ci.name]    = name;
-    d[ci.kg]      = kg;
-    // If retailMarkup: store source price in smallBatch col; retail col gets formula later
-    if (retailMarkup) {
-      d[ci.smallBatch] = rawRetail;
-      d[ci.retail]     = null; // filled by formula
-    } else {
-      d[ci.retail] = rawRetail;
+    d[ci.name] = name;
+    d[ci.kg]   = kg;
+
+    // МО = small batch price × kg (stored as plain number)
+    if (hasSmallBatch) {
+      d[ci.smallBatch] = rawSB !== null ? rawSB * kg : null;
     }
-    d[ci.pct]     = MAIN_COEF;
-    d[ci.coef]    = SEC_COEF;
+
+    // Розн: if retail exists in input → raw × kg stored; else formula МО×1.15 (applied below)
+    if (!retailMarkup) {
+      // retail found in input
+      d[ci.retail] = rawRetail !== null ? rawRetail * kg
+                   : rawSB    !== null  ? rawSB * kg * RETAIL_MUL  // fallback: sb×kg×1.15
+                   : null;
+    }
+    // else retailMarkup: retail col filled by formula in formula pass
+
+    d[ci.pct]  = MAIN_COEF;
+    d[ci.coef] = SEC_COEF;
     for (let s = 0; s < N; s++) d[BASE + s] = stocks[s] ?? null;
     d[ci.dim1]    = dimInfo.dim1 || null;
     d[ci.dim2]    = dimInfo.dim2 || null;
@@ -394,8 +391,8 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const cW  = `${L(ci.width)}${r}`;
     const cL  = `${L(ci.length)}${r}`;
 
-    // Розн = ROUNDUP(МелкОпт * MUL, 0) when retailMarkup
-    if (retailMarkup) {
+    // Розн = ROUNDUP(МО * 1.15, 0) when retail not in input but МО is
+    if (retailMarkup && hasSmallBatch) {
       const cSB = `${L(ci.smallBatch)}${r}`;
       ws.getCell(cC).value = { formula: `ROUNDUP(${cSB}*${RETAIL_MUL},0)` } as ExcelJS.CellFormulaValue;
     }
@@ -449,7 +446,7 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   });
 
   // retail column — light green (header + data); also smallBatch if present
-  const retailColsToColor = retailMarkup ? [ci.smallBatch, ci.retail] : [ci.retail];
+  const retailColsToColor = hasSmallBatch ? [ci.smallBatch, ci.retail] : [ci.retail];
   for (const idx of retailColsToColor) {
     ws.getRow(1).getCell(idx + 1).fill = fillRetail;
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).fill = fillRetail;
@@ -479,7 +476,7 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   for (const idx of [ci.retail, ci.mp, ci.mpPlus, ci.price]) {
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).numFmt = '#,##0';
   }
-  if (retailMarkup) {
+  if (hasSmallBatch) {
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(ci.smallBatch)}${r}`).numFmt = '#,##0';
   }
 
