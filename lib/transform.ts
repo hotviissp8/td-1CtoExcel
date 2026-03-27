@@ -42,6 +42,7 @@ interface DimInfo {
   dim1:     number;  // width  (mm) — 0 if unknown
   dim2:     number;  // height / length (mm) — 0 if unknown
   dimLabel: string;  // Размер column: width×height or length only (NO thickness)
+  rodChunk: number;  // for rods by meter: chunk size (e.g. 500 for x500); 0 otherwise
 }
 
 // Returns true if name indicates a rod/bar (sold by meter, round cross-section)
@@ -65,15 +66,22 @@ function extractDimInfo(name: string): DimInfo {
   const byPiece = isByPiece(name);
   const rod     = isRod(name);
 
+  // Helper: build rod-by-meter result.
+  // chunk = the xNNN value from the name (e.g. 500 for "x500") — used for stock counting.
+  // dim2 is always 1000 (price is per full meter).
+  const rodByMeter = (sortKey: number, chunk: number): DimInfo =>
+    ({ sortKey, dim1: 0, dim2: 1000, dimLabel: chunk ? `${chunk}` : '', rodChunk: chunk });
+
   // P1 – explicit Th×W×H     e.g. "2x1000x2000", "0,5x600x1200"
   let m = name.match(/\b(\d+(?:[,\.]\d+)?)\s*[xхXХ]\s*(\d{2,4})\s*[xхXХ]\s*(\d{3,5})\b/i);
   if (m) {
     const th = parseRu(m[1]), w = +m[2], h = +m[3];
     if (byMeter && !byPiece) {
+      if (rod) return rodByMeter(th, w);  // w is the chunk dimension here
       // sheet by meter: only width matters, length = 1000
-      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: `${w}x1000` };
+      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: `${w}x1000`, rodChunk: 0 };
     }
-    return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}` };
+    return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}`, rodChunk: 0 };
   }
 
   // P1b – decimal×W  e.g. "0,40х1250мм …х1000мм"
@@ -81,20 +89,21 @@ function extractDimInfo(name: string): DimInfo {
   if (m) {
     const th = parseRu(m[1]), w = +m[2];
     if (byMeter && !byPiece) {
-      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: `${w}x1000` };
+      if (rod) return rodByMeter(th, w);
+      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: `${w}x1000`, rodChunk: 0 };
     }
     const rest = name.slice(name.indexOf(m[0]) + m[0].length);
     const hm = rest.match(/[xхXХ]\s*(\d{3,5})/i);
     const h = hm ? +hm[1] : 0;
-    return { sortKey: th, dim1: w, dim2: h, dimLabel: h ? `${w}x${h}` : `${w}` };
+    return { sortKey: th, dim1: w, dim2: h, dimLabel: h ? `${w}x${h}` : `${w}`, rodChunk: 0 };
   }
 
   // P2 – ø / °   e.g. "ø20x6000"
   m = name.match(/[øØ°]\s*(\d+(?:[,\.]\d+)?)\s*(?:[xхXХ]\s*(\d{3,6}))?/i);
   if (m) {
-    const d = parseRu(m[1]), l = m[2] ? +m[2] : 0;
-    // Rod by meter: only length (dim2), dim1=0
-    return { sortKey: d, dim1: 0, dim2: l, dimLabel: l ? `${l}` : '' };
+    const d = parseRu(m[1]), chunk = m[2] ? +m[2] : 0;
+    if (byMeter && !byPiece) return rodByMeter(d, chunk);
+    return { sortKey: d, dim1: 0, dim2: chunk, dimLabel: chunk ? `${chunk}` : '', rodChunk: 0 };
   }
 
   // P3 – "диаметр / д"   e.g. "диаметр 59,97мм"
@@ -102,8 +111,9 @@ function extractDimInfo(name: string): DimInfo {
   if (m) {
     const d = parseRu(m[1]);
     const lm = name.match(/[xхXХ]\s*(\d{3,6})/i);
-    const l = lm ? +lm[1] : 0;
-    return { sortKey: d, dim1: 0, dim2: l, dimLabel: l ? `${l}` : '' };
+    const chunk = lm ? +lm[1] : 0;
+    if (byMeter && !byPiece) return rodByMeter(d, chunk);
+    return { sortKey: d, dim1: 0, dim2: chunk, dimLabel: chunk ? `${chunk}` : '', rodChunk: 0 };
   }
 
   // P4 – thickness from first "NNмкм" or "NNмм",  then cross-dimension(s)
@@ -117,43 +127,53 @@ function extractDimInfo(name: string): DimInfo {
     const th = isMicron ? rawTh / 1000 : rawTh;
 
     if (byMeter && !byPiece) {
-      // Sold by meter
       if (rod) {
-        // Rod: single dim = length (stock length in name)
-        const l = allX.length > 0 ? allX[allX.length - 1] : 0;
-        return { sortKey: th, dim1: 0, dim2: l, dimLabel: l ? `${l}` : '' };
-      } else {
-        // Sheet/roll by meter: extract width only, dim2=1000
-        const w = allX.length > 0 ? allX[0] : 0;
-        return { sortKey: th, dim1: w, dim2: 1000, dimLabel: w ? `${w}x1000` : '' };
+        // Rod: chunk = last xNNN value in the name
+        const chunk = allX.length > 0 ? allX[allX.length - 1] : 0;
+        return rodByMeter(th, chunk);
       }
+      // Not flagged as rod by isRod(), but check structural pattern:
+      // Sheet: NNмм is immediately followed by xNNN (e.g. "0,5мм x1250мм")
+      // Rod-like: NNмм stands alone; xNNN appears separately (e.g. "90мм РЕ-1000, х500мм")
+      if (allX.length === 1) {
+        const thEnd = (thM.index ?? 0) + thM[0].length;
+        const immediateX = /^\s*[xхXХ]/.test(name.slice(thEnd, thEnd + 5));
+        if (immediateX) {
+          return { sortKey: th, dim1: allX[0], dim2: 1000, dimLabel: `${allX[0]}x1000`, rodChunk: 0 };
+        } else {
+          return rodByMeter(th, allX[0]);
+        }
+      }
+      // Multiple or zero xNNN values → sheet/roll by meter
+      const w = allX.length > 0 ? allX[0] : 0;
+      return { sortKey: th, dim1: w, dim2: 1000, dimLabel: w ? `${w}x1000` : '', rodChunk: 0 };
     }
 
     // byPiece or plain (no suffix)
     if (whPairs.length > 0) {
       const w = +whPairs[0][1], h = +whPairs[0][2];
-      return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}` };
+      return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}`, rodChunk: 0 };
     }
     if (allX.length >= 2) {
       const [w, h] = allX;
-      return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}` };
+      return { sortKey: th, dim1: w, dim2: h, dimLabel: `${w}x${h}`, rodChunk: 0 };
     }
     if (allX.length === 1) {
       const d = allX[0];
-      if (byPiece) return { sortKey: th, dim1: 0, dim2: d, dimLabel: `${d}` };
+      if (byPiece) return { sortKey: th, dim1: 0, dim2: d, dimLabel: `${d}`, rodChunk: 0 };
       // No suffix, single dim → roll/film: width × 1000
-      return { sortKey: th, dim1: d, dim2: 1000, dimLabel: `${d}x1000` };
+      return { sortKey: th, dim1: d, dim2: 1000, dimLabel: `${d}x1000`, rodChunk: 0 };
     }
-    return { sortKey: th, dim1: 0, dim2: 0, dimLabel: '' };
+    return { sortKey: th, dim1: 0, dim2: 0, dimLabel: '', rodChunk: 0 };
   }
 
   // P5 – plain W×H fallback (no thickness info)
   if (whPairs.length > 0) {
     const w = +whPairs[0][1], h = +whPairs[0][2];
-    return { sortKey: w, dim1: w, dim2: h, dimLabel: `${w}x${h}` };
+    return { sortKey: w, dim1: w, dim2: h, dimLabel: `${w}x${h}`, rodChunk: 0 };
   }
 
-  return { sortKey: 0, dim1: 0, dim2: 0, dimLabel: '' };
+  return { sortKey: 0, dim1: 0, dim2: 0, dimLabel: '', rodChunk: 0 };
 }
 
 // ---- Weight extraction ----
@@ -300,21 +320,22 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     // hidden raw price cols (for formula references)
     rawSB:      BASE + N + 6,      // hidden: raw small batch price (only if hasSmallBatch)
     rawRetail:  BASE + N + 7,      // hidden: raw retail price (only if !retailMarkup)
+    rodChunk:   BASE + N + 8,      // hidden: rod chunk size in mm (0 for non-rods)
   };
-  const piecesBase = BASE + N + 8;
+  const piecesBase = BASE + N + 9;
   const totalCols  = piecesBase + N;
 
   // header row
   const hdr: (string | null)[] = new Array(totalCols).fill(null);
-  hdr[ci.name]   = 'Номенклатура';
+  hdr[ci.name]   = 'Имя';
   hdr[ci.kg]     = 'Ед';
   if (hasSmallBatch) hdr[ci.smallBatch] = 'МО';
-  hdr[ci.retail] = 'Розн';
+  hdr[ci.retail] = 'Роз';
   hdr[ci.pct]    = '%';
   hdr[ci.mp]     = 'МП';
   hdr[ci.coef]   = 'К';
   hdr[ci.mpPlus] = 'МП+';
-  for (let s = 0; s < N; s++) hdr[BASE + s] = capFirst(stockCols[s]?.label ?? '');
+  for (let s = 0; s < N; s++) hdr[BASE + s] = capFirst((stockCols[s]?.label ?? '').slice(0, 4));
   hdr[ci.dim1]      = 'dim1';
   hdr[ci.dim2]      = 'dim2';
   hdr[ci.sortKey]   = 'Д/Т';
@@ -323,7 +344,8 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   hdr[ci.price]     = 'Цена';
   hdr[ci.rawSB]     = 'rawSB';
   hdr[ci.rawRetail] = 'rawRozn';
-  for (let s = 0; s < N; s++) hdr[piecesBase + s] = `${capFirst(stockCols[s]?.label ?? '')} шт`;
+  hdr[ci.rodChunk]  = 'rodChunk';
+  for (let s = 0; s < N; s++) hdr[piecesBase + s] = `${capFirst((stockCols[s]?.label ?? '').slice(0, 4))} шт`;
 
   // ---- Build data rows ----
   interface OutRow { data: (string | number | null)[]; kgDefaulted: boolean; dimInfo: DimInfo; }
@@ -357,9 +379,10 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     d[ci.pct]  = MAIN_COEF;
     d[ci.coef] = SEC_COEF;
     for (let s = 0; s < N; s++) d[BASE + s] = stocks[s] ?? null;
-    d[ci.dim1]    = dimInfo.dim1 || null;
-    d[ci.dim2]    = dimInfo.dim2 || null;
-    d[ci.sortKey] = dimInfo.sortKey || null;
+    d[ci.dim1]     = dimInfo.dim1 || null;
+    d[ci.dim2]     = dimInfo.dim2 || null;
+    d[ci.sortKey]  = dimInfo.sortKey || null;
+    d[ci.rodChunk] = dimInfo.rodChunk || null;
 
     outRows.push({ data: d, kgDefaulted: kgD, dimInfo });
   }
@@ -385,6 +408,7 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     const cB  = `B${r}`;
     const cI1 = `${L(ci.dim1)}${r}`;
     const cI2 = `${L(ci.dim2)}${r}`;
+    const cRC = `${L(ci.rodChunk)}${r}`;
     const cW  = `${L(ci.width)}${r}`;
     const cL  = `${L(ci.length)}${r}`;
 
@@ -421,7 +445,7 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     // шт per warehouse:
     //   cut piece (both dims): INT(stock/kg) × INT(dim1/W) × INT(dim2/L)
     //   sheet by meter (dim2=1000, W only): INT(stock/kg) × INT(dim1/W)
-    //   rod (dim1=0, L only): INT(stock/kg) × INT(dim2/L)
+    //   rod by meter (dim1=0, dim2=1000, rodChunk>0, user fills L): INT(stock/kg) × INT(rodChunk/L)
     for (let s = 0; s < N; s++) {
       const cSt = `${L(BASE + s)}${r}`;
       ws.getCell(`${L(piecesBase + s)}${r}`).value = { formula:
@@ -429,8 +453,8 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
           `INT(${cSt}/${cB})*INT(${cI1}/${cW})*INT(${cI2}/${cL}),` +
         `IF(AND(${cSt}>0,${cB}>0,${cW}>0,${cI1}>0,${cI2}=1000),` +
           `INT(${cSt}/${cB})*INT(${cI1}/${cW}),` +
-        `IF(AND(${cSt}>0,${cB}>0,${cL}>0,${cI1}=0,${cI2}>0),` +
-          `INT(${cSt}/${cB})*INT(${cI2}/${cL}),"")))`
+        `IF(AND(${cSt}>0,${cB}>0,${cL}>0,${cI1}=0,${cI2}=1000,${cRC}>0),` +
+          `INT(${cSt}/${cB})*INT(${cRC}/${cL}),"")))`
       } as ExcelJS.CellFormulaValue;
     }
   }
@@ -442,6 +466,7 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   const fillRetail    = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFD9EAD3' } }; // light green — retail
   const fillPrice     = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFB8CCE4' } }; // light blue — МП+, цена
   const fillInput     = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFE8F0F8' } }; // very light blue — Шир/Дл
+  const fillRodWidth  = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFFC0CB' } }; // pink — Шир disabled for rods
 
   // kg column header always light yellow; data cells: yellow-warn if defaulted, else light yellow
   ws.getRow(1).getCell(ci.kg + 1).fill = fillKg;
@@ -462,11 +487,14 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).fill = fillPrice;
   }
 
-  // Шир / Дл — very light blue (user input)
-  for (const idx of [ci.width, ci.length]) {
-    ws.getRow(1).getCell(idx + 1).fill = fillInput;
-    for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(idx)}${r}`).fill = fillInput;
-  }
+  // Шир / Дл — very light blue (user input); Шир is pink for rod rows (input length only)
+  ws.getRow(1).getCell(ci.width + 1).fill = fillInput;
+  ws.getRow(1).getCell(ci.length + 1).fill = fillInput;
+  outRows.forEach(({ dimInfo }, idx) => {
+    const r = idx + 2;
+    ws.getCell(`${L(ci.width)}${r}`).fill  = dimInfo.rodChunk > 0 ? fillRodWidth : fillInput;
+    ws.getCell(`${L(ci.length)}${r}`).fill = fillInput;
+  });
 
   if (stockCols.length === 0) {
     for (let r = 2; r <= outRows.length + 1; r++) ws.getCell(`${L(BASE)}${r}`).fill = fillRed;
@@ -485,7 +513,7 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   }
 
   // hide internal columns
-  const hiddenCols = [ci.dim1, ci.dim2, ci.sortKey, ci.rawRetail];
+  const hiddenCols = [ci.dim1, ci.dim2, ci.sortKey, ci.rawRetail, ci.rodChunk];
   if (hasSmallBatch) hiddenCols.push(ci.rawSB);
   for (const idx of hiddenCols) {
     ws.getColumn(idx + 1).hidden = true;
