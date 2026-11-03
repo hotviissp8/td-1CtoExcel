@@ -169,31 +169,15 @@ export default function Home() {
     for (const { file } of uploadedFiles) {
       setCurrentFile(file.name);
       try {
-        const fd = new FormData();
-        fd.append('file', file);
+        // Processed locally in the browser: no upload, so no server body-size limit (413).
+        const { transformExcel } = await import('@/lib/transform');
+        const { buffer, warnings, rowCount } = await transformExcel(await file.arrayBuffer());
 
-        const res = await fetch('/api/transform', { method: 'POST', body: fd });
-
-        if (!res.ok) {
-          let msg = `Ошибка ${res.status}`;
-          try {
-            const j = await res.json();
-            if (j.error) msg = j.error;
-          } catch {/* ignore */}
-          addToast('error', `${file.name}: ${msg}`);
-          continue;
-        }
-
-        const blob = await res.blob();
+        const blob = new Blob([buffer], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
         const url = URL.createObjectURL(blob);
-
-        const rawWarnings = res.headers.get('X-Warnings') ?? '[]';
-        const warnings: string[] = (() => {
-          try { return JSON.parse(decodeURIComponent(rawWarnings)); } catch { return []; }
-        })();
-        const rowCount = parseInt(res.headers.get('X-Row-Count') ?? '0', 10);
-        const rawName = res.headers.get('X-Output-Name') ?? '';
-        const outName = rawName ? decodeURIComponent(rawName) : file.name.replace(/\.xlsx?$/i, '_result.xlsx');
+        const outName = file.name.replace(/\.xlsx?$/i, '') + '_result.xlsx';
 
         setOutputFiles(prev => [
           ...prev,

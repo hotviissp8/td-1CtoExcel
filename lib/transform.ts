@@ -218,13 +218,14 @@ function findAllStockCols(
 }
 
 // ---- Main transform ----
-export interface TransformResult { buffer: Buffer; warnings: string[]; rowCount: number; }
+// Runs both in the browser and in Node (no Buffer dependency).
+export interface TransformResult { buffer: Uint8Array<ArrayBuffer>; warnings: string[]; rowCount: number; }
 
-export async function transformExcel(buf: Buffer): Promise<TransformResult> {
+export async function transformExcel(buf: ArrayBuffer | Uint8Array): Promise<TransformResult> {
   const warnings: string[] = [];
 
   // ---- Read with raw:true so numbers arrive as numbers, not formatted strings ----
-  const wb = XLSX.read(buf, { type: 'buffer' });
+  const wb = XLSX.read(buf instanceof Uint8Array ? buf : new Uint8Array(buf), { type: 'array' });
   const raw: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
     header: 1, defval: '', raw: true,
   }) as unknown[][];
@@ -550,5 +551,5 @@ export async function transformExcel(buf: Buffer): Promise<TransformResult> {
   }
 
   const outBuf = await excelWb.xlsx.writeBuffer();
-  return { buffer: Buffer.from(outBuf), warnings, rowCount: outRows.length };
+  return { buffer: new Uint8Array(outBuf as ArrayBuffer), warnings, rowCount: outRows.length };
 }

@@ -9,8 +9,7 @@ export async function POST(request: NextRequest) {
     const file = formData.get('file') as File;
     if (!file) return NextResponse.json({ error: 'No file' }, { status: 400 });
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const { buffer: out, warnings, rowCount } = await transformExcel(buffer);
+    const { buffer: out, warnings, rowCount } = await transformExcel(await file.arrayBuffer());
 
     const baseName = file.name.replace(/\.xlsx?$/i, '');
     return new NextResponse(new Uint8Array(out), {
